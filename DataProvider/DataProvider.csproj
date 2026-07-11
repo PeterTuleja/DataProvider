@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Data.OleDb" Version="10.0.0-preview.1.25080.5" />
+    <PackageReference Include="System.Data.SqlClient" Version="4.9.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Kros.KORM">
+      <HintPath>..\..\..\..\..\..\Omega\Kros.KORM.dll</HintPath>
+    </Reference>
+    <Reference Include="Kros.KORM.MsAccess">
+      <HintPath>..\..\..\..\..\..\Omega\Kros.KORM.MsAccess.dll</HintPath>
+    </Reference>
+    <Reference Include="Kros.Utils">
+      <HintPath>..\..\..\..\..\..\Omega\Kros.Utils.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
