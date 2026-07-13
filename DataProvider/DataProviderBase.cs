@@ -33,34 +33,49 @@ namespace DataProvider
             }
             private List<ListMember> _list = new List<ListMember>();
 
+            // Cache je staticka a providery sa mozu vytvarat subezne z viacerych vlakien
+            // (sluzby + GraphQL API v jednom procese) - bez zamku hrozi race na Liste.
+            private readonly object _zamok = new object();
+
             internal void Add(string connectionString, IDbConnection connection, IDataProvider dataProvider)
             {
-                _list.Add(new ListMember() { connectionString = connectionString, connection = connection, dataProvider = dataProvider });
+                lock (_zamok)
+                {
+                    _list.Add(new ListMember() { connectionString = connectionString, connection = connection, dataProvider = dataProvider });
+                }
             }
 
             internal bool ContainsKey(string connectionString, IDbConnection connection)
             {
-                return _list.Any(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
+                lock (_zamok)
+                {
+                    return _list.Any(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
+                }
             }
 
             internal IDataProvider Item(string connectionString, IDbConnection connection)
             {
-                ListMember foundItem;
-                foundItem = _list.FirstOrDefault(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
-                if (foundItem == null)
-                    return null/* TODO Change to default(_) if this is not a reference type */;
-                else
-                    return foundItem.dataProvider;
+                lock (_zamok)
+                {
+                    ListMember foundItem = _list.FirstOrDefault(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
+                    return foundItem?.dataProvider;
+                }
             }
 
             internal void Remove(string connectionString, IDbConnection connection)
             {
-                _list.RemoveAll(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
+                lock (_zamok)
+                {
+                    _list.RemoveAll(a => a.connectionString.Equals(connectionString) && ReferenceEquals(a.connection, connection));
+                }
             }
 
             internal void Clear()
             {
-                _list.Clear();
+                lock (_zamok)
+                {
+                    _list.Clear();
+                }
             }
         }
 
@@ -205,21 +220,30 @@ namespace DataProvider
         private IDataReader ExecuteReaderInternall(string query, params object[] @params)
         {
             var conn = this.CreateConnection();
-
-            using (var cmd = conn.CreateCommand())
+            try
             {
-                SqlExpression expression = new SqlExpression(query, @params);
-                query = this.SqlExpressionVisitorFactory.CreateVisitor(conn).GenerateSql(expression).Query;
+                using (var cmd = conn.CreateCommand())
+                {
+                    SqlExpression expression = new SqlExpression(query, @params);
+                    query = this.SqlExpressionVisitorFactory.CreateVisitor(conn).GenerateSql(expression).Query;
 
-                cmd.CommandText = query;
-                cmd.CommandType = CommandType.Text;
+                    cmd.CommandText = query;
+                    cmd.CommandType = CommandType.Text;
 
-                if (@params?.Count() > 0)
-                    ParameterExtractingExpressionVisitor.ExtractParametersToCommand((DbCommand)cmd, expression);
+                    if (@params?.Count() > 0)
+                        ParameterExtractingExpressionVisitor.ExtractParametersToCommand((DbCommand)cmd, expression);
 
-                if (conn.State == ConnectionState.Closed)
-                    conn.Open();
-                return cmd.ExecuteReader(CommandBehavior.CloseConnection);
+                    if (conn.State == ConnectionState.Closed)
+                        conn.Open();
+                    return cmd.ExecuteReader(CommandBehavior.CloseConnection);
+                }
+            }
+            catch
+            {
+                // spojenie zatvara az reader (CloseConnection) - pri vynimke pred jeho
+                // vytvorenim (GenerateSql/Open/ExecuteReader) by inak zostalo visiet
+                conn.Dispose();
+                throw;
             }
         }
 
@@ -299,11 +323,12 @@ namespace DataProvider
         /// <param name="databaseFileName">Cesta k suboru s databazou spolu s nazvom suboru.</param>
         /// <example>
         /// <code>
-        /// Dim connectionString As String = "Provider=Microsoft.Jet.OLEDB.4.0;Data Source=X:\Data\TEST2016.MDB;Mode=ReadWrite"
-        /// Dim dbs = DataProviderBase.CreateDataProvider(connectionString, "X:\Data\TEST2016.MDB")
+        /// // Access cez ACE (x64 Access Database Engine musi byt nainstalovany; Jet 4.0 bol len x86):
+        /// string connectionString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=X:\Data\TEST2016.MDB;Mode=ReadWrite";
+        /// var dbs = DataProviderBase.CreateDataProvider(connectionString, "X:\Data\TEST2016.MDB");
         ///
-        /// Dim connectionString As String = "Data Source=SKVARKA\SQLEXPRESS;Initial Catalog=x_411673400;Integrated Security=True"
-        /// Dim dbs = DataProviderBase.CreateDataProvider(connectionString, "X:\Data\TEST2016.MDF")
+        /// string connectionString = "Data Source=SKVARKA\SQLEXPRESS;Initial Catalog=x_411673400;Integrated Security=True";
+        /// var dbs = DataProviderBase.CreateDataProvider(connectionString, "X:\Data\TEST2016.MDF");
         /// </code>
         /// </example>
         public static IDataProvider CreateDataProvider(string connectionString, string databaseFileName)
@@ -473,7 +498,18 @@ namespace DataProvider
 
         private static Dictionary<string, string> ParseConnectionString(string connectionString)
         {
-            return connectionString.Split(';').Where(i => !string.IsNullOrWhiteSpace(i)).ToDictionary(i => i.ToUpper().Split('=')[0],i => i.ToUpper().Split('=')[1]);
+            // DbConnectionStringBuilder korektne zvlada '=' v hodnotach (napr. heslo)
+            // aj tokeny bez '='. Povodny Split('=') na nich padal a hodnoty upper-casoval -
+            // nazov DB VELKYMI potom zlyhal v SELECT ... WHERE name = '..._dat'
+            // na case-sensitive kolacii. Kluce drzime upper (tak ich cakaju volajuci),
+            // hodnoty v povodnej velkosti.
+            var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
+            var values = new Dictionary<string, string>();
+            foreach (string key in builder.Keys)
+            {
+                values[key.ToUpperInvariant()] = builder[key]?.ToString() ?? string.Empty;
+            }
+            return values;
         }
 
         public IBulkInsert CreateBulkInsert()
