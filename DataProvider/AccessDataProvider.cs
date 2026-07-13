@@ -83,8 +83,10 @@
 
         public override void InitDatabaseForIdGenerator()
         {
-        //    Kros.Data.MsAccess.MsAccessIdGenerator generator = new Kros.Data.MsAccess.MsAccessIdGenerator(ConnectionString, "T000_INI", 1);
-        //    generator.InitDatabaseForIdGenerator();
+            // rovnaka implementacia ako v povodnom Omega.Database (AccessDataProvider.vb);
+            // MsAccessIdGenerator zije v Kros.Utils.MsAccess.dll (C:\Omega)
+            Kros.Data.MsAccess.MsAccessIdGenerator generator = new Kros.Data.MsAccess.MsAccessIdGenerator(ConnectionString, "T000_INI", 1);
+            generator.InitDatabaseForIdGenerator();
         }
 
         public override bool IsMsSql()

@@ -21,6 +21,9 @@
     <Reference Include="Kros.Utils">
       <HintPath>..\..\..\..\..\..\Omega\Kros.Utils.dll</HintPath>
     </Reference>
+    <Reference Include="Kros.Utils.MsAccess">
+      <HintPath>..\..\..\..\..\..\Omega\Kros.Utils.MsAccess.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>
