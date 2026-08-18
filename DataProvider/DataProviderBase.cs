@@ -250,13 +250,13 @@ namespace DataProvider
         public string ExecuteScalar(string query)
         {
             var value = this.ExecuteScalarInternal<string>(query);
-            return value != null ? value.ToString() : string.Empty;
+            return value?.ToString() ?? string.Empty;
         }
 
         public string ExecuteScalar(string query, params object[] @params)
         {
             var value = this.ExecuteScalarInternal<string>(query, @params);
-            return value != null ? value.ToString() : string.Empty;
+            return value?.ToString() ?? string.Empty;
         }
 
         public T? ExecuteScalar<T>(string query) where T : struct
@@ -271,9 +271,12 @@ namespace DataProvider
             return value != null ? (T)value : new Nullable<T>();
         }
 
-        private object ExecuteScalarInternal<T>(string query, params object[] @params)
+        private object? ExecuteScalarInternal<T>(string query, params object[] @params)
         {
-            return this.DB.Query<object>().Sql(query, @params).ExecuteScalar();
+            var value = this.DB.Query<object>().Sql(query, @params).ExecuteScalar();
+            // SQL NULL (napr. SUM nad prazdnou mnozinou riadkov) pride z ADO.NET ako DBNull.Value,
+            // co nie je null - volajuci by na (T)value dostal InvalidCastException
+            return value == DBNull.Value ? null : value;
         }
 
         public string GetSharedFolder()
