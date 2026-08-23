@@ -11,6 +11,7 @@ using Kros.Utils;
 using System.Configuration;
 using System.Data;
 using System.Data.Common;
+using System.Globalization;
 
 
 namespace DataProvider
@@ -261,14 +262,27 @@ namespace DataProvider
 
         public T? ExecuteScalar<T>(string query) where T : struct
         {
-            var value = this.ExecuteScalarInternal<T>(query);
-            return value != null ? (T)value : new Nullable<T>();
+            return PrevedNaTyp<T>(this.ExecuteScalarInternal<T>(query));
         }
 
         public T? ExecuteScalar<T>(string query, params object[] @params) where T : struct
         {
-            var value = this.ExecuteScalarInternal<T>(query, @params);
-            return value != null ? (T)value : new Nullable<T>();
+            return PrevedNaTyp<T>(this.ExecuteScalarInternal<T>(query, @params));
+        }
+
+        /// <summary>
+        /// ADO.NET vracia typ stlpca, nie typ, ktory pyta volajuci: SUM nad float stlpcom
+        /// (napr. C100_Mnozstvo) pride ako Double a unboxing (T)value na decimal by spadol
+        /// na InvalidCastException. Materializer v Query&lt;T&gt;() konvertuje, takze ExecuteScalar&lt;T&gt;
+        /// sa sprava rovnako. Ked typ sedi, hodnota ide bez konverzie.
+        /// </summary>
+        internal static T? PrevedNaTyp<T>(object? value) where T : struct
+        {
+            if (value == null)
+            {
+                return new Nullable<T>();
+            }
+            return value is T hodnota ? hodnota : (T)Convert.ChangeType(value, typeof(T), CultureInfo.InvariantCulture);
         }
 
         private object? ExecuteScalarInternal<T>(string query, params object[] @params)
