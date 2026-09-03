@@ -78,6 +78,48 @@ namespace DataProvider
                     _list.Clear();
                 }
             }
+
+            /// <summary>
+            /// Vyhľadanie, prípadné zahodenie nepoužiteľného providera a vytvorenie nového -
+            /// všetko pod jedným zámkom.
+            ///
+            /// Predtým mala zámok len jednotlivá metóda, takže zložené operácie chránené neboli:
+            /// medzi <c>ContainsKey</c> a <c>Item</c> mohlo iné vlákno urobiť <c>Remove</c>
+            /// (potom NRE), a medzi kontrolou cache a <c>Add</c> stihli dve vlákna vytvoriť dva
+            /// KORM <c>Database</c> objekty pre ten istý connection string.
+            /// </summary>
+            internal IDataProvider GetOrAdd(string connectionString, IDbConnection connection,
+                Func<IDataProvider, bool> jePouzitelny, Func<IDataProvider> vytvor, bool pridatDoCache,
+                out bool bolVytvoreny)
+            {
+                lock (_zamok)
+                {
+                    ListMember najdeny = _list.FirstOrDefault(a => a.connectionString.Equals(connectionString)
+                        && ReferenceEquals(a.connection, connection));
+                    if (najdeny?.dataProvider != null)
+                    {
+                        if (jePouzitelny(najdeny.dataProvider))
+                        {
+                            bolVytvoreny = false;
+                            return najdeny.dataProvider;
+                        }
+                        // Provider so zatvorenym connectionom by nezvladol ziaden dotaz - zahodime ho.
+                        _list.Remove(najdeny);
+                    }
+                    IDataProvider novy = vytvor();
+                    if (pridatDoCache)
+                    {
+                        _list.Add(new ListMember
+                        {
+                            connectionString = connectionString,
+                            connection = connection,
+                            dataProvider = novy
+                        });
+                    }
+                    bolVytvoreny = true;
+                    return novy;
+                }
+            }
         }
 
         private string _name;
@@ -250,14 +292,28 @@ namespace DataProvider
 
         public string ExecuteScalar(string query)
         {
-            var value = this.ExecuteScalarInternal<string>(query);
-            return value?.ToString() ?? string.Empty;
+            return NaRetazec(this.ExecuteScalarInternal<string>(query));
         }
 
         public string ExecuteScalar(string query, params object[] @params)
         {
-            var value = this.ExecuteScalarInternal<string>(query, @params);
-            return value?.ToString() ?? string.Empty;
+            return NaRetazec(this.ExecuteScalarInternal<string>(query, @params));
+        }
+
+        /// <summary>
+        /// Hodnota sa formatuje invariantne. Povodne value?.ToString() bralo CurrentCulture,
+        /// takze DateTime, float/decimal alebo money zo stlpca prisli v tvare zavislom od
+        /// nastavenia stroja - a vysledok sa dalej parsuje alebo sklada do SQL.
+        /// </summary>
+        private static string NaRetazec(object value)
+        {
+            if (value == null || value == DBNull.Value)
+            {
+                return string.Empty;
+            }
+            return value is IFormattable formattable
+                ? formattable.ToString(null, CultureInfo.InvariantCulture)
+                : value.ToString() ?? string.Empty;
         }
 
         public T? ExecuteScalar<T>(string query) where T : struct
@@ -293,7 +349,19 @@ namespace DataProvider
             return value == DBNull.Value ? null : value;
         }
 
+        private string _cacheSharedFolder;
+
+        /// <summary>
+        /// Zdielany adresar firmy. Vysledok sa cachuje na instanciu providera (jedna otvorena
+        /// firma) - bez cache sa pri kazdom volani spustil dotaz do T000_INI a IsFolderWritable
+        /// navyse vytvoril a zmazal testovaci subor na sietovom disku.
+        /// </summary>
         public string GetSharedFolder()
+        {
+            return _cacheSharedFolder ??= NacitajSharedFolder();
+        }
+
+        private string NacitajSharedFolder()
         {
             var result = this.ExecuteScalar("SELECT C097_MemoA FROM T000_INI WHERE C000_ID = @1 AND C010_IDUzivatel = @2", 11088, 0);
             if (string.IsNullOrWhiteSpace(result))
@@ -383,21 +451,27 @@ namespace DataProvider
             IDataProvider db;
             var values = ParseConnectionString(connectionString);
 
-            db = CheckOpenConnections(IsMsSql(values), connectionString, null/* TODO Change to default(_) if this is not a reference type */);
-            if (db != null)
-                return db;
-
-            if (IsMsSql(values))
+            bool jeSql = IsMsSql(values);
+            // Vyhladanie aj vytvorenie pod jednym zamkom - vid ConnectionList.GetOrAdd.
+            db = _openConnections.GetOrAdd(connectionString, null, p => JePouzitelnyProvider(p, jeSql), () =>
             {
-                db = new SqlDataProvider(GetInitialCatalog(values), connectionString, sqlExpressionVisitorFactory, sharedFolder, databaseFileName);
-                ((SqlDataProvider)db).InitializeSharedFolder();
-            }
-            else
-                db = new AccessDataProvider(databaseFileName, connectionString, sqlExpressionVisitorFactory);
-            if (addConnectionToOpenConnections)
-                _openConnections.Add(connectionString, null/* TODO Change to default(_) if this is not a reference type */, db);
+                IDataProvider novy;
+                if (jeSql)
+                {
+                    novy = new SqlDataProvider(GetInitialCatalog(values), connectionString, sqlExpressionVisitorFactory, sharedFolder, databaseFileName);
+                    ((SqlDataProvider)novy).InitializeSharedFolder();
+                }
+                else
+                {
+                    novy = new AccessDataProvider(databaseFileName, connectionString, sqlExpressionVisitorFactory);
+                }
+                return novy;
+            }, addConnectionToOpenConnections, out bool bolVytvoreny);
 
-            InitializeDirectory(db, databaseFileName, directoryInitializer);
+            if (bolVytvoreny)
+            {
+                InitializeDirectory(db, databaseFileName, directoryInitializer);
+            }
             return db;
         }
 
@@ -417,46 +491,54 @@ namespace DataProvider
             IDataProvider db;
             var values = ParseConnectionString(connection.ConnectionString);
 
-            db = CheckOpenConnections(IsMsSql(values), connection.ConnectionString, connection);
-            if (db != null)
-                return db;
-            if (IsMsSql(values))
+            bool jeSql = IsMsSql(values);
+            db = _openConnections.GetOrAdd(connection.ConnectionString, connection, p => JePouzitelnyProvider(p, jeSql), () =>
             {
-                db = new SqlDataProvider(GetInitialCatalog(values), connection, sqlExpressionVisitorFactory, sharedFolder, databaseFileName);
-                ((SqlDataProvider)db).InitializeSharedFolder();
+                IDataProvider novy;
+                if (jeSql)
+                {
+                    novy = new SqlDataProvider(GetInitialCatalog(values), connection, sqlExpressionVisitorFactory, sharedFolder, databaseFileName);
+                    ((SqlDataProvider)novy).InitializeSharedFolder();
+                }
+                else
+                {
+                    novy = new AccessDataProvider(databaseFileName, connection, sqlExpressionVisitorFactory);
+                }
+                return novy;
+            }, addConnectionToOpenConnections, out bool bolVytvoreny);
+
+            if (bolVytvoreny)
+            {
+                InitializeDirectory(db, databaseFileName, directoryInitializer);
             }
-            else
-                db = new AccessDataProvider(databaseFileName, connection, sqlExpressionVisitorFactory);
-
-            if (addConnectionToOpenConnections)
-                _openConnections.Add(connection.ConnectionString, connection, db);
-
-            InitializeDirectory(db, databaseFileName, directoryInitializer);
             return db;
         }
 
-        private static IDataProvider CheckOpenConnections(bool jeSql, string connectionString, IDbConnection connection)
+        /// <summary>
+        /// Je nacachovaný provider ešte použiteľný? Query provider so zatvoreným connectionom
+        /// by nezvládol žiaden dotaz, takže sa musí zahodiť a vytvoriť nový.
+        ///
+        /// Nahrádza pôvodné <c>CheckOpenConnections</c>, ktoré robilo <c>ContainsKey</c>
+        /// a potom samostatné <c>Item(...)</c> — medzi tým mohlo iné vlákno urobiť
+        /// <c>Remove</c> a <c>Item</c> vrátil null → NRE na <c>.Query&lt;Int32&gt;()</c>.
+        /// Volá sa už pod zámkom ConnectionList.
+        /// </summary>
+        private static bool JePouzitelnyProvider(IDataProvider dataProvider, bool jeSql)
         {
-            IDataProvider dataProvider = null/* TODO Change to default(_) if this is not a reference type */;
-            if (_openConnections.ContainsKey(connectionString, connection))
+            try
             {
-                System.Linq.IQueryProvider provider = _openConnections.Item(connectionString, connection).Query<Int32>().Provider;
-                ConnectionState connectionState;
-                if (jeSql)
-                    connectionState = ((oSqlServerQueryProvider)provider).CurrentConnectionState;
-                else
-                    connectionState = ((oMsAccessQueryProvider)provider).CurrentConnectionState;
-                // musim skontrolovat ConnectionState pre query providera, ak by bol close tak by nefungoval ziaden query dotaz
-                if (connectionState == ConnectionState.Closed)
-                {
-                    // stary provider zahodim a vratim nothing, co zabezpeci vytvorenie noveho, inak vratim nejaky uz vytvoreny
-                    _openConnections.Remove(connectionString, connection);
-                    dataProvider = null/* TODO Change to default(_) if this is not a reference type */;
-                }
-                else
-                    dataProvider = (IDataProvider)_openConnections.Item(connectionString, connection);
+                System.Linq.IQueryProvider provider = dataProvider.Query<Int32>().Provider;
+                ConnectionState connectionState = jeSql
+                    ? ((oSqlServerQueryProvider)provider).CurrentConnectionState
+                    : ((oMsAccessQueryProvider)provider).CurrentConnectionState;
+                return connectionState != ConnectionState.Closed;
             }
-            return dataProvider;
+            catch (Exception)
+            {
+                // Zahodený/nekompatibilný provider - radšej vytvoríme nový, než aby výnimka
+                // vyletela z otvárania firmy.
+                return false;
+            }
         }
 
         /// <summary>
